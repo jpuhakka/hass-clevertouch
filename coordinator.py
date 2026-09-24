@@ -16,6 +16,7 @@ from homeassistant.const import (
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import DeviceInfo
+from homeassistant.helpers import device_registry as dr
 
 from homeassistant.helpers.update_coordinator import (
     CoordinatorEntity,
@@ -74,6 +75,7 @@ class CleverTouchUpdateCoordinator(DataUpdateCoordinator[None]):
         )
         self.user: User | None = None
         self.homes: dict[str, Home] = {}
+        self.home_device_ids: dict[str, str] = {}
         self._quick_updates = QuickUpdatesController(
             standard_interval=timedelta(seconds=DEFAULT_SCAN_INTERVAL_SECONDS),
             quick_interval=timedelta(seconds=QUICK_SCAN_INTERVAL_SECONDS),
@@ -118,6 +120,7 @@ class CleverTouchUpdateCoordinator(DataUpdateCoordinator[None]):
                 _LOGGER.debug(
                     "Retrieved %d new homes from CleverTouch", len(self.homes)
                 )
+                self._register_home_devices()
             else:
                 for home in self.homes.values():
                     await home.refresh()
@@ -142,6 +145,18 @@ class CleverTouchUpdateCoordinator(DataUpdateCoordinator[None]):
         """Return the unique id for a home."""
         return f"{self.model_id}_{home_id}"
 
+    def _register_home_devices(self) -> None:
+        """Register a parent device for each home and remember its id."""
+        registry = dr.async_get(self.hass)
+        for home_id, home in self.homes.items():
+            device_entry = registry.async_get_or_create(
+                config_entry_id=self.config_entry.entry_id,
+                identifiers={(DOMAIN, self.get_unique_home_id(home_id))},
+                manufacturer=self.model.manufacturer,
+                name=getattr(home, "label", None) or f"Home {home_id}",
+            )
+            self.home_device_ids[home_id] = device_entry.id
+
 
 class CleverTouchEntity(CoordinatorEntity[CleverTouchUpdateCoordinator]):
     """Base class for a CleverTouch entity.
@@ -156,14 +171,24 @@ class CleverTouchEntity(CoordinatorEntity[CleverTouchUpdateCoordinator]):
         super().__init__(coordinator)
         self.device: Device = device
 
-        self._attr_device_info = DeviceInfo(
+        device_info = DeviceInfo(
             identifiers={(DOMAIN, f"{coordinator.model_id}_{device.device_id}")},
             manufacturer=coordinator.model.manufacturer,
             model=f"{device.device_type}",
             name=f"{device.zone.label} {device.label}",
-            via_device=(DOMAIN, coordinator.get_unique_home_id(device.home.home_id)),
             suggested_area=device.zone.label,
         )
+
+        via_id = coordinator.home_device_ids.get(device.home.home_id)
+        if via_id is not None:
+            device_info["via_device_id"] = via_id
+        else:
+            _LOGGER.debug(
+                "No parent device found for home %s; creating %s without via_device_id",
+                device.home.home_id,
+                device.device_id,
+            )
+        self._attr_device_info = device_info
 
     @property
     def unique_id(self) -> str | None:
